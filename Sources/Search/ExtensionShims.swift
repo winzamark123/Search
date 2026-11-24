@@ -2557,6 +2557,28 @@ enum ExtensionShims {
         }, true);
       }
 
+      // An extension's page framed in a website, as Vimium's HUD is: Chrome
+      // lets navigator.clipboard.writeText() write once the frame is focused,
+      // even after a round-trip through the background worker, where WebKit
+      // drops user activation and refuses with NotAllowedError. Try WebKit
+      // first; only on NotAllowedError, ask Search, which writes only right
+      // after a real click or key in a page this extension may reach.
+      if (embedded && typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        const target = typeof Clipboard === "function" && Clipboard.prototype
+          && Object.prototype.hasOwnProperty.call(Clipboard.prototype, "writeText")
+          ? Clipboard.prototype : navigator.clipboard;
+        const writeText = navigator.clipboard.writeText;
+        put(target, "writeText", function (text) {
+          let attempt;
+          try { attempt = writeText.apply(this, arguments); }
+          catch (error) { return Promise.reject(error); }
+          return Promise.resolve(attempt).catch((error) => {
+            if (!error || error.name !== "NotAllowedError") throw error;
+            return native("clipboard.writeText", [String(text)]).catch(() => { throw error; });
+          });
+        });
+      }
+
       // In a website's frame, everything WebKit keeps to the extension's own
       // process goes through the worker instead. What stays direct is what
       // WebKit lets a content script call too. Namespaces the shim adds
@@ -5666,6 +5688,57 @@ enum ExtensionShims {
     /// One voice for every extension that reads aloud.
     static let speaker = NSSpeechSynthesizer()
 
+    /// Where clipboard writes from an embedded extension frame go: the Mac's
+    /// clipboard, or on a test run a pasteboard of the bench's own so tests
+    /// never take yours.
+    static var clipboardBoard: NSPasteboard = Store.testing
+        ? NSPasteboard(name: NSPasteboard.Name("search.bench.clipboard"))
+        : .general
+
+    private static let maxClipboardBytes = 10 * 1024 * 1024
+
+    /// Fallback for `navigator.clipboard.writeText` in an embedded extension
+    /// frame that lost WebKit's user activation. Writes only right after a
+    /// real click or key in a page the extension may reach, consumes that
+    /// gesture so one press grants at most one write, and marks private-tab
+    /// copies transient so clipboard managers skip them.
+    @discardableResult
+    static func writeClipboard(
+        _ text: String,
+        touch: inout Extensions.PageTouch?,
+        now: Date = Date(),
+        appActive: Bool? = nil,
+        hasAccess: (URL) -> Bool,
+        hasPrivateAccess: Bool,
+        to board: NSPasteboard? = nil
+    ) throws -> Bool {
+        guard text.utf8.count <= maxClipboardBytes else {
+            throw Unsupported(what: "Clipboard text too large.")
+        }
+        let active = appActive ?? (Store.testing || NSApp.isActive)
+        guard active, let recent = touch else {
+            throw Unsupported(what: "Clipboard write requires a recent user gesture.")
+        }
+        let age = now.timeIntervalSince(recent.at)
+        guard age >= 0, age < 2 else {
+            throw Unsupported(what: "Clipboard write requires a recent user gesture.")
+        }
+        guard !recent.shy || hasPrivateAccess else {
+            throw Unsupported(what: "The extension isn't allowed in private tabs.")
+        }
+        guard hasAccess(recent.url) else {
+            throw Unsupported(what: "The extension hasn't been granted this site.")
+        }
+        touch = nil
+        let target = board ?? clipboardBoard
+        target.clearContents()
+        target.setString(text, forType: .string)
+        if recent.shy {
+            target.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        }
+        return true
+    }
+
     static func answer(_ message: Any, from context: WKWebExtensionContext, owner: Extensions) async throws -> Any? {
         guard let body = message as? [String: Any], let api = body["api"] as? String else {
             return ["error": "Not a Search message"]
@@ -6329,6 +6402,18 @@ enum ExtensionShims {
         case "memory.rulesBuilt":
             Trim.rulesBuilt()
             return nil
+
+        // MARK: clipboard fallback for embedded extension frames
+        case "clipboard.writeText":
+            guard let text = first as? String else {
+                throw Unsupported(what: "clipboard.writeText needs a string.")
+            }
+            return try writeClipboard(
+                text,
+                touch: &Extensions.pageTouched,
+                hasAccess: { context.hasAccess(to: $0) },
+                hasPrivateAccess: context.hasAccessToPrivateData
+            )
 
         // MARK: its own pages, for clients.matchAll() (see the shim)
         case "clients.pages":

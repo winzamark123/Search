@@ -1948,6 +1948,16 @@ final class Extensions: NSObject, ObservableObject {
     /// its popup, or a page of its in a tab. Real events only: a page's
     /// script can dispatch one, but it never reaches here.
     static var touched: [String: Date] = [:]
+    /// The last real click or key in a web page's view: an extension's frame
+    /// embedded in that page loses WebKit's user activation across a worker
+    /// round-trip (Vimium's yy in its HUD iframe, for one), so this records
+    /// which page you just acted in and whether it is private.
+    struct PageTouch {
+        let url: URL
+        let shy: Bool
+        let at: Date
+    }
+    static var pageTouched: PageTouch?
     /// What every extension page's view shares, by which a tab knows it
     /// shows one (see ExtensionPageDelegate).
     static weak var pages: WKUserContentController?
@@ -1961,8 +1971,20 @@ final class Extensions: NSObject, ObservableObject {
                 ? event.window?.firstResponder as? NSView
                 : event.window?.contentView?.superview?.hitTest(event.locationInWindow)
             while let found = view, !(found is WKWebView) { view = found.superview }
-            if let url = (view as? WKWebView)?.url, url.scheme?.lowercased() == Extensions.scheme, let id = url.host() {
-                Extensions.touched[id] = Date()
+            if let web = view as? WKWebView, let url = web.url {
+                let scheme = url.scheme?.lowercased()
+                if scheme == Extensions.scheme, let id = url.host() {
+                    Extensions.touched[id] = Date()
+                    Extensions.pageTouched = nil
+                } else if scheme == "http" || scheme == "https" || scheme == "file" {
+                    let shy = !web.configuration.websiteDataStore.isPersistent
+                        || Browsers.all.contains { $0.popupTab(for: web)?.shy == true }
+                    Extensions.pageTouched = PageTouch(url: url, shy: shy, at: Date())
+                } else {
+                    Extensions.pageTouched = nil
+                }
+            } else {
+                Extensions.pageTouched = nil
             }
             return event
         }
