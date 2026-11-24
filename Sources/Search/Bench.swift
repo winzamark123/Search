@@ -5635,7 +5635,7 @@ final class Bench {
                     "size": [Double(size.width), Double(size.height)],
                     "least": [Double(StylePanel.least.width), Double(StylePanel.least.height)]])
 
-        case "extensions", "ext-add", "ext-crx", "ext-fetches", "ext-folder", "ext-safari", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-check", "ext-enable", "ext-private", "ext-sites", "capture", "capture-stop":
+        case "extensions", "ext-add", "ext-crx", "ext-fetches", "ext-folder", "ext-safari", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-clipboard", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-check", "ext-enable", "ext-private", "ext-sites", "capture", "capture-stop":
             guard #available(macOS 15.4, *) else {
                 answer(["error": "extensions need macOS 15.4"])
                 return
@@ -6340,6 +6340,13 @@ final class Bench {
             let tab = browser.benchOpen(context.baseURL.appendingPathComponent(path))
             house(tab)
             answer(describe(tab))
+        case "ext-clipboard":
+            // Test runs only: the pasteboard the shim writes to, never the Mac's.
+            guard Store.testing else { answer(["error": "ext-clipboard only works on a --test run"]); return }
+            let board = ExtensionShims.clipboardBoard
+            if request["clear"] as? Bool == true { board.clearContents() }
+            let transient = board.data(forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType")) != nil
+            answer(["text": board.string(forType: .string) ?? "", "transient": transient])
         default:
             answer(["error": "unknown"])
         }
